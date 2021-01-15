@@ -1,6 +1,6 @@
 # coding=utf-8
 # pynput
-# Copyright (C) 2015-2016 Moses Palmér
+# Copyright (C) 2015-2020 Moses Palmér
 #
 # This program is free software: you can redistribute it and/or modify it under
 # the terms of the GNU Lesser General Public License as published by the Free
@@ -14,10 +14,73 @@
 #
 # You should have received a copy of the GNU Lesser General Public License
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
+"""
+General utility functions and classes.
+"""
+
+# pylint: disable=R0903
+# We implement minimal mixins
+
+# pylint: disable=W0212
+# We implement an internal API
 
 import contextlib
 import functools
+import importlib
+import os
+import sys
 import threading
+
+import six
+
+from six.moves import queue
+
+
+#: Possible resolutions for import related errors.
+RESOLUTIONS = {
+    'darwin': 'Please make sure that you have Python bindings for the '
+        'system frameworks installed',
+    'uinput': 'Please make sure that you are running as root, and that '
+        'the utility dumpkeys is installed',
+    'xorg': 'Please make sure that you have an X server running, and that '
+        'the DISPLAY environment variable is set correctly'}
+
+
+def backend(package):
+    """Returns the backend module for a package.
+
+    :param str package: The package for which to load a backend.
+    """
+    backend_name = os.environ.get(
+        'PYNPUT_BACKEND_{}'.format(package.rsplit('.')[-1].upper()),
+        os.environ.get('PYNPUT_BACKEND', None))
+    if backend_name:
+        modules = [backend_name]
+    elif sys.platform == 'darwin':
+        modules = ['darwin']
+    elif sys.platform == 'win32':
+        modules = ['win32']
+    else:
+        modules = ['xorg']
+
+    errors = []
+    resolutions = []
+    for module in modules:
+        try:
+            return importlib.import_module('._' + module, package)
+        except ImportError as e:
+            errors.append(e)
+            if module in RESOLUTIONS:
+                resolutions.append(RESOLUTIONS[module])
+
+    raise ImportError('this platform is not supported: {}'.format(
+        '; '.join(str(e) for e in errors)) + ('\n\n'
+            'Try one of the following resolutions:\n\n'
+            + '\n\n'.join(
+                ' * {}'.format(s)
+                for s in resolutions))
+            if resolutions else '')
+
 
 
 class AbstractListener(threading.Thread):
@@ -33,6 +96,13 @@ class AbstractListener(threading.Thread):
         finally:
             listener.stop()
 
+    Actual implementations of this class must set the attribute ``_log``, which
+    must be an instance of :class:`logging.Logger`.
+
+    :param bool suppress: Whether to suppress events. Setting this to ``True``
+        will prevent the input events from being passed to the rest of the
+        system.
+
     :param kwargs: A mapping from callback attribute to callback handler. All
         handlers will be wrapped in a function reading the return value of the
         callback, and if it ``is False``, raising :class:`StopException`.
@@ -42,30 +112,41 @@ class AbstractListener(threading.Thread):
     class StopException(Exception):
         """If an event listener callback raises this exception, the current
         listener is stopped.
-
-        Its first argument must be set to the :class:`AbstractListener` to
-        stop.
         """
         pass
 
-    def __init__(self, **kwargs):
+    #: Exceptions that are handled outside of the emitter and should thus not
+    #: be passed through the queue
+    _HANDLED_EXCEPTIONS = tuple()
+
+    def __init__(self, suppress=False, **kwargs):
         super(AbstractListener, self).__init__()
 
         def wrapper(f):
             def inner(*args):
                 if f(*args) is False:
-                    raise self.StopException(self)
+                    raise self.StopException()
             return inner
 
+        self._suppress = suppress
         self._running = False
         self._thread = threading.current_thread()
         self._condition = threading.Condition()
         self._ready = False
 
+        # Allow multiple calls to stop
+        self._queue = queue.Queue(10)
+
         self.daemon = True
 
         for name, callback in kwargs.items():
             setattr(self, name, wrapper(callback or (lambda *a: None)))
+
+    @property
+    def suppress(self):
+        """Whether to suppress events.
+        """
+        return self._suppress
 
     @property
     def running(self):
@@ -74,20 +155,26 @@ class AbstractListener(threading.Thread):
         return self._running
 
     def stop(self):
-        """Stops listening for mouse events.
+        """Stops listening for events.
 
-        When this method returns, no more events will be delivered.
+        When this method returns, no more events will be delivered. Once this
+        method has been called, the listener instance cannot be used any more,
+        since a listener is a :class:`threading.Thread`, and once stopped it
+        cannot be restarted.
+
+        To resume listening for event, a new listener must be created.
         """
         if self._running:
             self._running = False
-            self._stop()
+            self._queue.put(None)
+            self._stop_platform()
 
     def __enter__(self):
         self.start()
         self.wait()
         return self
 
-    def __exit__(self, type, value, traceback):
+    def __exit__(self, exc_type, value, traceback):
         self.stop()
 
     def wait(self):
@@ -105,19 +192,34 @@ class AbstractListener(threading.Thread):
         self._thread = threading.current_thread()
         self._run()
 
+        # Make sure that the queue contains something
+        self._queue.put(None)
+
     @classmethod
-    def _emitter(self, f):
+    def _emitter(cls, f):
         """A decorator to mark a method as the one emitting the callbacks.
 
-        This decorator will wrap the method and catch :class:`StopException`.
-        If this exception is caught, the listener will be stopped.
+        This decorator will wrap the method and catch exception. If a
+        :class:`StopException` is caught, the listener will be stopped
+        gracefully. If any other exception is caught, it will be propagated to
+        the thread calling :meth:`join` and reraised there.
         """
         @functools.wraps(f)
-        def inner(*args, **kwargs):
+        def inner(self, *args, **kwargs):
+            # pylint: disable=W0702; we want to catch all exception
             try:
-                f(*args, **kwargs)
-            except self.StopException as e:
-                e.args[0].stop()
+                return f(self, *args, **kwargs)
+            except Exception as e:
+                if not isinstance(e, self._HANDLED_EXCEPTIONS):
+                    if not isinstance(e, AbstractListener.StopException):
+                        self._log.exception(
+                            'Unhandled exception in listener callback')
+                    self._queue.put(
+                        None if isinstance(e, cls.StopException)
+                        else sys.exc_info())
+                    self.stop()
+                raise
+            # pylint: enable=W0702
 
         return inner
 
@@ -139,12 +241,111 @@ class AbstractListener(threading.Thread):
         """
         raise NotImplementedError()
 
-    def _stop(self):
+    def _stop_platform(self):
         """The implementation of the :meth:`stop` method.
 
         This is a platform dependent implementation.
         """
         raise NotImplementedError()
+
+    def join(self, *args):
+        super(AbstractListener, self).join(*args)
+
+        # Reraise any exceptions
+        try:
+            exc_type, exc_value, exc_traceback = self._queue.get()
+        except TypeError:
+            return
+        six.reraise(exc_type, exc_value, exc_traceback)
+
+
+class Events(object):
+    """A base class to enable iterating over events.
+    """
+    #: The listener class providing events.
+    _Listener = None
+
+    class Event(object):
+        def __str__(self):
+            return '{}({})'.format(
+                self.__class__.__name__,
+                ', '.join(
+                    '{}={}'.format(k, v)
+                    for (k, v) in vars(self).items()))
+
+        def __eq__(self, other):
+            return self.__class__ == other.__class__ \
+                and dir(self) == dir(other) \
+                and all(
+                    getattr(self, k) == getattr(other, k)
+                    for k in dir(self))
+
+    def __init__(self, *args, **kwargs):
+        super(Events, self).__init__()
+        self._event_queue = queue.Queue()
+        self._sentinel = object()
+        self._listener = self._Listener(*args, **{
+            key: self._event_mapper(value)
+            for (key, value) in kwargs.items()})
+        self.start = self._listener.start
+
+    def __enter__(self):
+        self._listener.__enter__()
+        return self
+
+    def __exit__(self, *args):
+        self._listener.__exit__(*args)
+
+        # Drain the queue to ensure that the put does not block
+        while True:
+            try:
+                self._event_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        self._event_queue.put(self._sentinel)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        event = self.get()
+        if event is not None:
+            return event
+        else:
+            raise StopIteration()
+
+    def get(self, timeout=None):
+        """Attempts to read the next event.
+
+        :param int timeout: An optional timeout. If this is not provided, this
+            method may block infinitely.
+
+        :return: the next event, or ``None`` if the source has been stopped or
+            no events were received
+        """
+        try:
+            event = self._event_queue.get(timeout=timeout)
+            return event if event is not self._sentinel else None
+        except queue.Empty:
+            return None
+
+    def _event_mapper(self, event):
+        """Generates an event callback to transforms the callback arguments to
+        an event and then publishes it.
+
+        :param callback event: A function generating an event object.
+
+        :return: a callback
+        """
+        @functools.wraps(event)
+        def inner(*args):
+            try:
+                self._event_queue.put(event(*args), block=False)
+            except queue.Full:
+                pass
+
+        return inner
 
 
 class NotifierMixin(object):

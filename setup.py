@@ -23,12 +23,16 @@ RUNTIME_PACKAGES = [
 
 #: Additional requirements used during setup
 SETUP_PACKAGES = [
+    'setuptools-lint >=0.5',
     'sphinx >=1.3.1']
 
 #: Packages requires for different environments
 EXTRA_PACKAGES = {
     ':sys_platform == "darwin"': [
         'pyobjc-framework-Quartz >=3.0'],
+    ':"linux" in sys_platform': [
+        'evdev >= 1.3',
+        'python-xlib >= 0.17'],
     ':python_version == "2.7"': [
         'enum34']}
 
@@ -39,8 +43,8 @@ with open(os.path.join(
         os.path.dirname(__file__),
         'lib',
         MAIN_PACKAGE_NAME,
-        '_info.py')) as f:
-    for line in f:
+        '_info.py'), 'rb') as f:
+    for line in f.read().decode('utf-8').splitlines():
         try:
             name, value = (i.strip() for i in line.split('='))
             if name.startswith('__') and name.endswith('__'):
@@ -53,18 +57,18 @@ with open(os.path.join(
 try:
     with open(os.path.join(
             os.path.dirname(__file__),
-            'README.rst')) as f:
-        README = f.read()
+            'README.rst'), 'rb') as f:
+        README = f.read().decode('utf-8')
 
     with open(os.path.join(
             os.path.dirname(__file__),
-            'mouse-usage.rst')) as f:
-        README += '\n\n' + f.read()
+            os.path.join('docs', 'mouse-usage.rst')), 'rb') as f:
+        README += '\n\n' + f.read().decode('utf-8')
 
     with open(os.path.join(
             os.path.dirname(__file__),
-            'keyboard-usage.rst')) as f:
-        README += '\n\n' + f.read()
+            os.path.join('docs', 'keyboard-usage.rst')), 'rb') as f:
+        README += '\n\n' + f.read().decode('utf-8')
 except IOError:
     README = ''
 
@@ -73,8 +77,8 @@ except IOError:
 try:
     with open(os.path.join(
             os.path.dirname(__file__),
-            'CHANGES.rst')) as f:
-        CHANGES = f.read()
+            'CHANGES.rst'), 'rb') as f:
+        CHANGES = f.read().decode('utf-8')
 except IOError:
     CHANGES = ''
 
@@ -116,5 +120,10 @@ setuptools.setup(
         'Programming Language :: Python',
         'Programming Language :: Python :: 2.7',
         'Programming Language :: Python :: 3.4',
+        'Programming Language :: Python :: 3.5',
+        'Programming Language :: Python :: 3.6',
+        'Programming Language :: Python :: 3.7',
+        'Programming Language :: Python :: 3.8',
+        'Programming Language :: Python :: 3.9',
         'Topic :: Software Development :: Libraries :: Python Modules',
         'Topic :: System :: Monitoring'])

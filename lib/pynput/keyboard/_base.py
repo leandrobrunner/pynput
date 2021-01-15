@@ -1,6 +1,6 @@
 # coding=utf-8
 # pynput
-# Copyright (C) 2015-2016 Moses Palmér
+# Copyright (C) 2015-2020 Moses Palmér
 #
 # This program is free software: you can redistribute it and/or modify it under
 # the terms of the GNU Lesser General Public License as published by the Free
@@ -14,29 +14,57 @@
 #
 # You should have received a copy of the GNU Lesser General Public License
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
+"""
+This module contains the base implementation.
+
+The actual interface to keyboard classes is defined here, but the
+implementation is located in a platform dependent module.
+"""
+
+# pylint: disable=R0903
+# We implement stubs
 
 import contextlib
 import enum
-import six
 import threading
 import unicodedata
 
+import six
+
 from pynput._util import AbstractListener
+from pynput import _logger
 
 
 class KeyCode(object):
-    def __init__(self, vk=0, char=None, is_dead=False):
+    """
+    A :class:`KeyCode` represents the description of a key code used by the
+    operating system.
+    """
+    #: The names of attributes used as platform extensions.
+    _PLATFORM_EXTENSIONS = []
+
+    def __init__(self, vk=None, char=None, is_dead=False, **kwargs):
         self.vk = vk
         self.char = six.text_type(char) if char is not None else None
         self.is_dead = is_dead
 
         if self.is_dead:
-            self.combining = unicodedata.lookup(
-                'COMBINING ' + unicodedata.name(self.char))
-            if not self.combining:
+            try:
+                self.combining = unicodedata.lookup(
+                    'COMBINING ' + unicodedata.name(self.char))
+            except KeyError:
+                self.is_dead = False
+                self.combining = None
+            if self.is_dead and not self.combining:
                 raise KeyError(char)
         else:
             self.combining = None
+
+        for key in self._PLATFORM_EXTENSIONS:
+            setattr(self, key, kwargs.pop(key, None))
+        if kwargs:
+            raise ValueError(kwargs)
+
 
     def __repr__(self):
         if self.is_dead:
@@ -55,7 +83,9 @@ class KeyCode(object):
         if self.char is not None and other.char is not None:
             return self.char == other.char and self.is_dead == other.is_dead
         else:
-            return self.vk == other.vk
+            return self.vk == other.vk and all(
+                getattr(self, f) == getattr(other, f)
+                for f in self._PLATFORM_EXTENSIONS)
 
     def __hash__(self):
         return hash(repr(self))
@@ -95,7 +125,7 @@ class KeyCode(object):
         raise ValueError(key)
 
     @classmethod
-    def from_vk(self, vk, **kwargs):
+    def from_vk(cls, vk, **kwargs):
         """Creates a key from a virtual key code.
 
         :param vk: The virtual key code.
@@ -104,20 +134,20 @@ class KeyCode(object):
 
         :return: a key code
         """
-        return self(vk=vk, **kwargs)
+        return cls(vk=vk, **kwargs)
 
     @classmethod
-    def from_char(self, char):
+    def from_char(cls, char, **kwargs):
         """Creates a key from a character.
 
         :param str char: The character.
 
         :return: a key code
         """
-        return self(char=char)
+        return cls(char=char, **kwargs)
 
     @classmethod
-    def from_dead(self, char):
+    def from_dead(cls, char, **kwargs):
         """Creates a dead key.
 
         :param char: The dead key. This should be the unicode character
@@ -126,7 +156,7 @@ class KeyCode(object):
 
         :return: a key code
         """
-        return self(char=char, is_dead=True)
+        return cls(char=char, is_dead=True, **kwargs)
 
 
 class Key(enum.Enum):
@@ -249,6 +279,24 @@ class Key(enum.Enum):
     #: An up arrow key.
     up = 0
 
+    #: The play/pause toggle.
+    media_play_pause = 0
+
+    #: The volume mute button.
+    media_volume_mute = 0
+
+    #: The volume down button.
+    media_volume_down = 0
+
+    #: The volume up button.
+    media_volume_up = 0
+
+    #: The previous track button.
+    media_previous = 0
+
+    #: The next track button.
+    media_next = 0
+
     #: The Insert key. This may be undefined for some platforms.
     insert = 0
 
@@ -278,7 +326,7 @@ class Controller(object):
     _Key = Key
 
     class InvalidKeyException(Exception):
-        """The exception raised when and invalid ``key`` parameter is passed to
+        """The exception raised when an invalid ``key`` parameter is passed to
         either :meth:`Controller.press` or :meth:`Controller.release`.
 
         Its first argument is the ``key`` parameter.
@@ -286,7 +334,7 @@ class Controller(object):
         pass
 
     class InvalidCharacterException(Exception):
-        """The exception raised when and invalid character is encountered in
+        """The exception raised when an invalid character is encountered in
         the string passed to :meth:`Controller.type`.
 
         Its first argument is the index of the character in the string, and the
@@ -295,21 +343,11 @@ class Controller(object):
         pass
 
     def __init__(self):
+        self._log = _logger(self.__class__)
         self._modifiers_lock = threading.RLock()
         self._modifiers = set()
         self._caps_lock = False
         self._dead_key = None
-
-        K = self._Key
-
-        #: The keys used as modifiers; the first value in each tuple is the
-        #: base modifier to use for subsequent modifiers.
-        self._MODIFIER_KEYS = (
-            (K.alt_gr, (K.alt_gr.value,)),
-            (K.alt,    (K.alt.value,   K.alt_l.value,   K.alt_r.value)),
-            (K.cmd,    (K.cmd.value,   K.cmd_l.value,   K.cmd_r.value)),
-            (K.ctrl,   (K.ctrl.value,  K.ctrl_l.value,  K.ctrl_r.value)),
-            (K.shift,  (K.shift.value, K.shift_l.value, K.shift_r.value)))
 
     def press(self, key):
         """Presses a key.
@@ -328,6 +366,8 @@ class Controller(object):
         :raises ValueError: if ``key`` is a string, but its length is not ``1``
         """
         resolved = self._resolve(key)
+        if resolved is None:
+            raise self.InvalidKeyException(key)
         self._update_modifiers(resolved, True)
 
         # Update caps lock state
@@ -376,6 +416,8 @@ class Controller(object):
         :raises ValueError: if ``key`` is a string, but its length is not ``1``
         """
         resolved = self._resolve(key)
+        if resolved is None:
+            raise self.InvalidKeyException(key)
         self._update_modifiers(resolved, False)
 
         # Ignore released dead keys
@@ -384,6 +426,23 @@ class Controller(object):
 
         self._handle(resolved, False)
 
+    def tap(self, key):
+        """Presses and releases a key.
+
+        This is equivalent to the following code::
+
+            controller.press(key)
+            controller.release(key)
+
+        :param key: The key to press.
+
+        :raises InvalidKeyException: if the key is invalid
+
+        :raises ValueError: if ``key`` is a string, but its length is not ``1``
+        """
+        self.press(key)
+        self.release(key)
+
     def touch(self, key, is_press):
         """Calls either :meth:`press` or :meth:`release` depending on the value
         of ``is_press``.
@@ -391,6 +450,8 @@ class Controller(object):
         :param key: The key to press or release.
 
         :param bool is_press: Whether to press the key.
+
+        :raises InvalidKeyException: if the key is invalid
         """
         if is_press:
             self.press(key)
@@ -410,7 +471,7 @@ class Controller(object):
             yield
         finally:
             for key in reversed(args):
-                self.press(key)
+                self.release(key)
 
     def type(self, string):
         """Types a string.
@@ -423,18 +484,25 @@ class Controller(object):
         :raises InvalidCharacterException: if an untypable character is
             encountered
         """
+        from . import _CONTROL_CODES
         for i, character in enumerate(string):
+            key = _CONTROL_CODES.get(character, character)
             try:
-                self.press(character)
-                self.release(character)
+                self.press(key)
+                self.release(key)
 
-            except ValueError:
+            except (ValueError, self.InvalidKeyException):
                 raise self.InvalidCharacterException(i, character)
 
     @property
     @contextlib.contextmanager
     def modifiers(self):
         """The currently pressed modifier keys.
+
+        Please note that this reflects only the internal state of this
+        controller, and not the state of the operating system keyboard buffer.
+        This property cannot be used to determine whether a key is physically
+        pressed.
 
         Only the generic modifiers will be set; when pressing either
         :attr:`Key.shift_l`, :attr:`Key.shift_r` or :attr:`Key.shift`, only
@@ -455,6 +523,9 @@ class Controller(object):
     @property
     def alt_pressed(self):
         """Whether any *alt* key is pressed.
+
+        Please note that this reflects only the internal state of this
+        controller. See :attr:`modifiers` for more information.
         """
         with self.modifiers as modifiers:
             return self._Key.alt in modifiers
@@ -462,6 +533,9 @@ class Controller(object):
     @property
     def alt_gr_pressed(self):
         """Whether *altgr* is pressed.
+
+        Please note that this reflects only the internal state of this
+        controller. See :attr:`modifiers` for more information.
         """
         with self.modifiers as modifiers:
             return self._Key.alt_gr in modifiers
@@ -469,6 +543,9 @@ class Controller(object):
     @property
     def ctrl_pressed(self):
         """Whether any *ctrl* key is pressed.
+
+        Please note that this reflects only the internal state of this
+        controller. See :attr:`modifiers` for more information.
         """
         with self.modifiers as modifiers:
             return self._Key.ctrl in modifiers
@@ -476,6 +553,9 @@ class Controller(object):
     @property
     def shift_pressed(self):
         """Whether any *shift* key is pressed, or *caps lock* is toggled.
+
+        Please note that this reflects only the internal state of this
+        controller. See :attr:`modifiers` for more information.
         """
         if self._caps_lock:
             return True
@@ -494,7 +574,7 @@ class Controller(object):
         :return: a key code, or ``None`` if it cannot be resolved
         """
         # Use the value for the key constants
-        if key in self._Key:
+        if key in (k for k in self._Key):
             return key.value
 
         # Convert strings to key codes
@@ -539,9 +619,8 @@ class Controller(object):
         :return: the base modifier key, or ``None`` if ``key`` is not a
             modifier
         """
-        for base, modifiers in self._MODIFIER_KEYS:
-            if key in modifiers:
-                return base
+        from . import _NORMAL_MODIFIERS
+        return _NORMAL_MODIFIERS.get(key, None)
 
     def _handle(self, key, is_press):
         """The platform implementation of the actual emitting of keyboard
@@ -556,6 +635,7 @@ class Controller(object):
         raise NotImplementedError()
 
 
+# pylint: disable=W0223; This is also an abstract class
 class Listener(AbstractListener):
     """A listener for keyboard events.
 
@@ -564,6 +644,7 @@ class Listener(AbstractListener):
 
         listener.start()
         try:
+            listener.wait()
             with_statements()
         finally:
             listener.stop()
@@ -576,11 +657,73 @@ class Listener(AbstractListener):
         It will be called with the argument ``(key)``, where ``key`` is a
         :class:`KeyCode`, a :class:`Key` or ``None`` if the key is unknown.
 
-    :param callable on_release: The callback to call when a button is release.
+    :param callable on_release: The callback to call when a button is released.
 
         It will be called with the argument ``(key)``, where ``key`` is a
         :class:`KeyCode`, a :class:`Key` or ``None`` if the key is unknown.
+
+    :param bool suppress: Whether to suppress events. Setting this to ``True``
+        will prevent the input events from being passed to the rest of the
+        system.
+
+    :param kwargs: Any non-standard platform dependent options. These should be
+        prefixed with the platform name thus: ``darwin_``, ``xorg_`` or
+        ``win32_``.
+
+        Supported values are:
+
+        ``darwin_intercept``
+            A callable taking the arguments ``(event_type, event)``, where
+            ``event_type`` is ``Quartz.kCGEventKeyDown`` or
+            ``Quartz.kCGEventKeyDown``, and ``event`` is a ``CGEventRef``.
+
+            This callable can freely modify the event using functions like
+            ``Quartz.CGEventSetIntegerValueField``. If this callable does not
+            return the event, the event is suppressed system wide.
+
+        ``win32_event_filter``
+            A callable taking the arguments ``(msg, data)``, where ``msg`` is
+            the current message, and ``data`` associated data as a
+            `KBDLLHOOKSTRUCT <https://docs.microsoft.com/en-gb/windows/win32/api/winuser/ns-winuser-kbdllhookstruct>`_.
+
+            If this callback returns ``False``, the event will not be
+            propagated to the listener callback.
+
+            If ``self.suppress_event()`` is called, the event is suppressed
+            system wide.
     """
-    def __init__(self, on_press=None, on_release=None):
+    def __init__(self, on_press=None, on_release=None, suppress=False,
+                 **kwargs):
+        self._log = _logger(self.__class__)
+        prefix = self.__class__.__module__.rsplit('.', 1)[-1][1:] + '_'
+        self._options = {
+            key[len(prefix):]: value
+            for key, value in kwargs.items()
+            if key.startswith(prefix)}
         super(Listener, self).__init__(
-            on_press=on_press, on_release=on_release)
+            on_press=on_press, on_release=on_release, suppress=suppress)
+# pylint: enable=W0223
+
+    def canonical(self, key):
+        """Performs normalisation of a key.
+
+        This method attempts to convert key events to their canonical form, so
+        that events will equal regardless of modifier state.
+
+        This method will convert upper case keys to lower case keys, convert
+        any modifiers with a right and left version to the same value, and may
+        slow perform additional platform dependent normalisation.
+
+        :param key: The key to normalise.
+        :type key: Key or KeyCode
+
+        :return: a key
+        :rtype: Key or KeyCode
+        """
+        from pynput.keyboard import Key, KeyCode, _NORMAL_MODIFIERS
+        if isinstance(key, KeyCode) and key.char is not None:
+            return KeyCode.from_char(key.char.lower())
+        elif isinstance(key, Key) and key.value in _NORMAL_MODIFIERS:
+            return _NORMAL_MODIFIERS[key.value]
+        else:
+            return key

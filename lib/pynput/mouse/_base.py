@@ -1,6 +1,6 @@
 # coding=utf-8
 # pynput
-# Copyright (C) 2015-2016 Moses Palmér
+# Copyright (C) 2015-2020 Moses Palmér
 #
 # This program is free software: you can redistribute it and/or modify it under
 # the terms of the GNU Lesser General Public License as published by the Free
@@ -14,10 +14,20 @@
 #
 # You should have received a copy of the GNU Lesser General Public License
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
+"""
+This module contains the base implementation.
+
+The actual interface to mouse classes is defined here, but the implementation
+is located in a platform dependent module.
+"""
+
+# pylint: disable=R0903
+# We implement stubs
 
 import enum
 
 from pynput._util import AbstractListener
+from pynput import _logger
 
 
 class Button(enum.Enum):
@@ -27,6 +37,9 @@ class Button(enum.Enum):
     platforms may have additional buttons, but these are guaranteed to be
     present everywhere.
     """
+    #: An unknown button was pressed
+    unknown = 0
+
     #: The left button
     left = 1
 
@@ -40,6 +53,9 @@ class Button(enum.Enum):
 class Controller(object):
     """A controller for sending virtual mouse events to the system.
     """
+    def __init__(self):
+        self._log = _logger(self.__class__)
+
     @property
     def position(self):
         """The current position of the mouse pointer.
@@ -60,6 +76,9 @@ class Controller(object):
 
         :param int dy: The vertical scroll. The units of scrolling is
             undefined.
+
+        :raises ValueError: if the values are invalid, for example out of
+            bounds
         """
         self._scroll(dx, dy)
 
@@ -84,6 +103,9 @@ class Controller(object):
         :param int x: The horizontal offset.
 
         :param int dy: The vertical offset.
+
+        :raises ValueError: if the values are invalid, for example out of
+            bounds
         """
         self.position = tuple(sum(i) for i in zip(self.position, (dx, dy)))
 
@@ -112,7 +134,7 @@ class Controller(object):
         """
         return self
 
-    def __exit__(self, type, value, traceback):
+    def __exit__(self, exc_type, value, traceback):
         """Ends a series of clicks.
         """
         pass
@@ -153,6 +175,7 @@ class Controller(object):
         raise NotImplementedError()
 
 
+# pylint: disable=W0223; This is also an abstract class
 class Listener(AbstractListener):
     """A listener for mouse events.
 
@@ -161,6 +184,7 @@ class Listener(AbstractListener):
 
         listener.start()
         try:
+            listener.wait()
             with_statements()
         finally:
             listener.stop()
@@ -194,7 +218,46 @@ class Listener(AbstractListener):
 
         If this callback raises :class:`StopException` or returns ``False``,
         the listener is stopped.
+
+    :param bool suppress: Whether to suppress events. Setting this to ``True``
+        will prevent the input events from being passed to the rest of the
+        system.
+
+    :param kwargs: Any non-standard platform dependent options. These should be
+        prefixed with the platform name thus: ``darwin_``, ``xorg_`` or
+        ``win32_``.
+
+        Supported values are:
+
+        ``darwin_intercept``
+            A callable taking the arguments ``(event_type, event)``, where
+            ``event_type`` is any mouse related event type constant, and
+            ``event`` is a ``CGEventRef``.
+
+            This callable can freely modify the event using functions like
+            ``Quartz.CGEventSetIntegerValueField``. If this callable does not
+            return the event, the event is suppressed system wide.
+
+        ``win32_event_filter``
+            A callable taking the arguments ``(msg, data)``, where ``msg`` is
+            the current message, and ``data`` associated data as a
+            `MSLLHOOKSTRUCT <https://docs.microsoft.com/en-gb/windows/win32/api/winuser/ns-winuser-msllhookstruct>`_.
+
+            If this callback returns ``False``, the event will not
+            be propagated to the listener callback.
+
+            If ``self.suppress_event()`` is called, the event is suppressed
+            system wide.
     """
-    def __init__(self, on_move=None, on_click=None, on_scroll=None):
+    def __init__(self, on_move=None, on_click=None, on_scroll=None,
+                 suppress=False, **kwargs):
+        self._log = _logger(self.__class__)
+        prefix = self.__class__.__module__.rsplit('.', 1)[-1][1:] + '_'
+        self._options = {
+            key[len(prefix):]: value
+            for key, value in kwargs.items()
+            if key.startswith(prefix)}
         super(Listener, self).__init__(
-            on_move=on_move, on_click=on_click, on_scroll=on_scroll)
+            on_move=on_move, on_click=on_click, on_scroll=on_scroll,
+            suppress=suppress)
+# pylint: enable=W0223

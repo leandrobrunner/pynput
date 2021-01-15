@@ -1,6 +1,6 @@
 # coding=utf-8
 # pynput
-# Copyright (C) 2015-2016 Moses Palmér
+# Copyright (C) 2015-2020 Moses Palmér
 #
 # This program is free software: you can redistribute it and/or modify it under
 # the terms of the GNU Lesser General Public License as published by the Free
@@ -14,25 +14,54 @@
 #
 # You should have received a copy of the GNU Lesser General Public License
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
+"""
+The mouse implementation for *Windows*.
+"""
 
+# pylint: disable=C0111
+# The documentation is extracted from the base classes
+
+# pylint: disable=R0903
+# We implement stubs
+
+import ctypes
 import enum
 
+from ctypes import (
+    windll,
+    wintypes)
+
 from pynput._util import NotifierMixin
-from pynput._util.win32 import *
+from pynput._util.win32 import (
+    INPUT,
+    INPUT_union,
+    ListenerMixin,
+    MOUSEINPUT,
+    SendInput,
+    SystemHook)
 from . import _base
+
+#: A constant used as a factor when constructing mouse scroll data.
+WHEEL_DELTA = 120
 
 
 class Button(enum.Enum):
     """The various buttons.
     """
-    left = (MOUSEINPUT.LEFTUP, MOUSEINPUT.LEFTDOWN)
-    middle = (MOUSEINPUT.MIDDLEUP, MOUSEINPUT.MIDDLEDOWN)
-    right = (MOUSEINPUT.RIGHTUP, MOUSEINPUT.RIGHTDOWN)
+    unknown = None
+    left = (MOUSEINPUT.LEFTUP, MOUSEINPUT.LEFTDOWN, 0)
+    middle = (MOUSEINPUT.MIDDLEUP, MOUSEINPUT.MIDDLEDOWN, 0)
+    right = (MOUSEINPUT.RIGHTUP, MOUSEINPUT.RIGHTDOWN, 0)
+    x1 = (MOUSEINPUT.XUP, MOUSEINPUT.XDOWN, MOUSEINPUT.XBUTTON1)
+    x2 = (MOUSEINPUT.XUP, MOUSEINPUT.XDOWN, MOUSEINPUT.XBUTTON2)
 
 
 class Controller(NotifierMixin, _base.Controller):
     __GetCursorPos = windll.user32.GetCursorPos
     __SetCursorPos = windll.user32.SetCursorPos
+
+    def __init__(self, *args, **kwargs):
+        super(Controller, self).__init__(*args, **kwargs)
 
     def _position_get(self):
         point = wintypes.POINT()
@@ -42,6 +71,7 @@ class Controller(NotifierMixin, _base.Controller):
             return None
 
     def _position_set(self, pos):
+        pos = int(pos[0]), int(pos[1])
         self.__SetCursorPos(*pos)
         self._emit('on_move', *pos)
 
@@ -54,7 +84,7 @@ class Controller(NotifierMixin, _base.Controller):
                     value=INPUT_union(
                         mi=MOUSEINPUT(
                             dwFlags=MOUSEINPUT.WHEEL,
-                            mouseData=dy)))),
+                            mouseData=int(dy * WHEEL_DELTA))))),
                 ctypes.sizeof(INPUT))
 
         if dx:
@@ -65,12 +95,12 @@ class Controller(NotifierMixin, _base.Controller):
                     value=INPUT_union(
                         mi=MOUSEINPUT(
                             dwFlags=MOUSEINPUT.HWHEEL,
-                            mouseData=dy)))),
+                            mouseData=int(dx * WHEEL_DELTA))))),
                 ctypes.sizeof(INPUT))
 
         if dx or dy:
-            x, y = self._position_get()
-            self._emit('on_scroll', x, y, dx, dy)
+            px, py = self._position_get()
+            self._emit('on_scroll', px, py, dx, dy)
 
     def _press(self, button):
         SendInput(
@@ -79,10 +109,9 @@ class Controller(NotifierMixin, _base.Controller):
                 type=INPUT.MOUSE,
                 value=INPUT_union(
                     mi=MOUSEINPUT(
-                        dwFlags=button.value[0])))),
+                        dwFlags=button.value[1],
+                        mouseData=button.value[2])))),
             ctypes.sizeof(INPUT))
-        x, y = self.position
-        self._emit('on_click', x, y, button, True)
 
     def _release(self, button):
         SendInput(
@@ -91,10 +120,9 @@ class Controller(NotifierMixin, _base.Controller):
                 type=INPUT.MOUSE,
                 value=INPUT_union(
                     mi=MOUSEINPUT(
-                        dwFlags=button.value[1])))),
+                        dwFlags=button.value[0],
+                        mouseData=button.value[2])))),
             ctypes.sizeof(INPUT))
-        x, y = self.position
-        self._emit('on_click', x, y, button, False)
 
 
 @Controller._receiver
@@ -102,27 +130,49 @@ class Listener(ListenerMixin, _base.Listener):
     #: The Windows hook ID for low level mouse events, ``WH_MOUSE_LL``
     _EVENTS = 14
 
-    _WM_LBUTTONDOWN = 0x0201
-    _WM_LBUTTONUP = 0x0202
-    _WM_MOUSEMOVE = 0x0200
-    _WM_MOUSEWHEEL = 0x020A
-    _WM_MOUSEHWHEEL = 0x020E
-    _WM_RBUTTONDOWN = 0x0204
-    _WM_RBUTTONUP = 0x0205
+    WM_LBUTTONDOWN = 0x0201
+    WM_LBUTTONUP = 0x0202
+    WM_MBUTTONDOWN = 0x0207
+    WM_MBUTTONUP = 0x0208
+    WM_MOUSEMOVE = 0x0200
+    WM_MOUSEWHEEL = 0x020A
+    WM_MOUSEHWHEEL = 0x020E
+    WM_RBUTTONDOWN = 0x0204
+    WM_RBUTTONUP = 0x0205
+    WM_XBUTTONDOWN = 0x20B
+    WM_XBUTTONUP = 0x20C
 
-    _WHEEL_DELTA = 120
+    MK_XBUTTON1 = 0x0020
+    MK_XBUTTON2 = 0x0040
+
+    XBUTTON1 = 1
+    XBUTTON2 = 2
 
     #: A mapping from messages to button events
-    _CLICK_BUTTONS = {
-        _WM_LBUTTONDOWN: (Button.left, True),
-        _WM_LBUTTONUP: (Button.left, False),
-        _WM_RBUTTONDOWN: (Button.right, True),
-        _WM_RBUTTONUP: (Button.right, False)}
+    CLICK_BUTTONS = {
+        WM_LBUTTONDOWN: (Button.left, True),
+        WM_LBUTTONUP: (Button.left, False),
+        WM_MBUTTONDOWN: (Button.middle, True),
+        WM_MBUTTONUP: (Button.middle, False),
+        WM_RBUTTONDOWN: (Button.right, True),
+        WM_RBUTTONUP: (Button.right, False)}
+
+    #: A mapping from message to X button events.
+    X_BUTTONS = {
+        WM_XBUTTONDOWN: {
+            XBUTTON1: (Button.x1, True),
+            XBUTTON2: (Button.x2, True)},
+        WM_XBUTTONUP: {
+            XBUTTON1: (Button.x1, False),
+            XBUTTON2: (Button.x2, False)}}
 
     #: A mapping from messages to scroll vectors
-    _SCROLL_BUTTONS = {
-        _WM_MOUSEWHEEL: (0, 1),
-        _WM_MOUSEHWHEEL: (1, 0)}
+    SCROLL_BUTTONS = {
+        WM_MOUSEWHEEL: (0, 1),
+        WM_MOUSEHWHEEL: (1, 0)}
+
+    _HANDLED_EXCEPTIONS = (
+        SystemHook.SuppressException,)
 
     class _MSLLHOOKSTRUCT(ctypes.Structure):
         """Contains information about a mouse event passed to a ``WH_MOUSE_LL``
@@ -138,20 +188,34 @@ class Listener(ListenerMixin, _base.Listener):
     #: A pointer to a :class:`_MSLLHOOKSTRUCT`
     _LPMSLLHOOKSTRUCT = ctypes.POINTER(_MSLLHOOKSTRUCT)
 
+    def __init__(self, *args, **kwargs):
+        super(Listener, self).__init__(*args, **kwargs)
+        self._event_filter = self._options.get(
+            'event_filter',
+            lambda msg, data: True)
+
     def _handle(self, code, msg, lpdata):
         if code != SystemHook.HC_ACTION:
             return
 
         data = ctypes.cast(lpdata, self._LPMSLLHOOKSTRUCT).contents
 
-        if msg == self._WM_MOUSEMOVE:
+        # Suppress further propagation of the event if it is filtered
+        if self._event_filter(msg, data) is False:
+            return
+
+        if msg == self.WM_MOUSEMOVE:
             self.on_move(data.pt.x, data.pt.y)
 
-        elif msg in self._CLICK_BUTTONS:
-            button, pressed = self._CLICK_BUTTONS[msg]
+        elif msg in self.CLICK_BUTTONS:
+            button, pressed = self.CLICK_BUTTONS[msg]
             self.on_click(data.pt.x, data.pt.y, button, pressed)
 
-        elif msg in self._SCROLL_BUTTONS:
-            mx, my = self._SCROLL_BUTTONS[msg]
-            d = wintypes.SHORT(data.mouseData >> 16).value // self._WHEEL_DELTA
-            self.on_scroll(data.pt.x, data.pt.y, d * mx, d * my)
+        elif msg in self.X_BUTTONS:
+            button, pressed = self.X_BUTTONS[msg][data.mouseData >> 16]
+            self.on_click(data.pt.x, data.pt.y, button, pressed)
+
+        elif msg in self.SCROLL_BUTTONS:
+            mx, my = self.SCROLL_BUTTONS[msg]
+            dd = wintypes.SHORT(data.mouseData >> 16).value // WHEEL_DELTA
+            self.on_scroll(data.pt.x, data.pt.y, dd * mx, dd * my)

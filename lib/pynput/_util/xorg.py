@@ -1,6 +1,6 @@
 # coding=utf-8
 # pynput
-# Copyright (C) 2015-2016 Moses Palmér
+# Copyright (C) 2015-2020 Moses Palmér
 #
 # This program is free software: you can redistribute it and/or modify it under
 # the terms of the GNU Lesser General Public License as published by the Free
@@ -14,21 +14,31 @@
 #
 # You should have received a copy of the GNU Lesser General Public License
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
+"""
+Utility functions and classes for the *Xorg* backend.
+"""
+
+# pylint: disable=R0903
+# We implement stubs
 
 import contextlib
+import functools
 import itertools
+import operator
 import Xlib.display
 import Xlib.threaded
 import Xlib.XK
 
 from . import AbstractListener
-from .xorg_keysyms import *
+from .xorg_keysyms import SYMBOLS
 
 
 # Create a display to verify that we have an X connection
-display = Xlib.display.Display()
-display.close()
-del display
+def _check():
+    display = Xlib.display.Display()
+    display.close()
+_check()
+del _check
 
 
 class X11Error(Exception):
@@ -54,6 +64,8 @@ def display_manager(display):
     errors = []
 
     def handler(*args):
+        """The *Xlib* error handler.
+        """
         errors.append(args)
 
     old_handler = display.set_error_handler(handler)
@@ -117,6 +129,21 @@ def alt_gr_mask(display):
     return display.__altgr_mask
 
 
+def numlock_mask(display):
+    """Returns the *numlock* mask flags.
+
+    The first time this function is called for a display, the value is cached.
+    Subsequent calls will return the cached value.
+
+    :param Xlib.display.Display display: The *X* display.
+
+    :return: the modifier mask
+    """
+    if not hasattr(display, '__numlock_mask'):
+        display.__numlock_mask = _find_mask(display, 'Num_Lock')
+    return display.__numlock_mask
+
+
 def keysym_is_latin_upper(keysym):
     """Determines whether a *keysym* is an upper case *latin* character.
 
@@ -137,7 +164,7 @@ def keysym_is_latin_lower(keysym):
     return Xlib.XK.XK_a <= keysym <= Xlib.XK.XK_z
 
 
-def keysym_group(a, b):
+def keysym_group(ks1, ks2):
     """Generates a group from two *keysyms*.
 
     The implementation of this function comes from:
@@ -156,21 +183,21 @@ def keysym_group(a, b):
     appears to be consistent with observations of the return values from
     ``XGetKeyboardMapping``.
 
-    :param a: The first *keysym*.
+    :param ks1: The first *keysym*.
 
-    :param b: The second *keysym*.
+    :param ks2: The second *keysym*.
 
     :return: a tuple conforming to the description above
     """
-    if b == Xlib.XK.NoSymbol:
-        if keysym_is_latin_upper(a):
-            return (Xlib.XK.XK_a + a - Xlib.XK.XK_A, a)
-        elif keysym_is_latin_lower(a):
-            return (a, Xlib.XK.XK_A + a - Xlib.XK.XK_a)
+    if ks2 == Xlib.XK.NoSymbol:
+        if keysym_is_latin_upper(ks1):
+            return (Xlib.XK.XK_a + ks1 - Xlib.XK.XK_A, ks1)
+        elif keysym_is_latin_lower(ks1):
+            return (ks1, Xlib.XK.XK_A + ks1 - Xlib.XK.XK_a)
         else:
-            return (a, a)
+            return (ks1, ks1)
     else:
-        return (a, b)
+        return (ks1, ks2)
 
 
 def keysym_normalize(keysym):
@@ -256,7 +283,7 @@ def shift_to_index(display, shift):
 
     :param int index: The keyboard mapping *key code* index.
 
-    :retur: a shift mask
+    :return: a shift mask
     """
     return (
         (1 if shift & 1 else 0) +
@@ -306,6 +333,20 @@ def keyboard_mapping(display):
     return mapping
 
 
+def char_to_keysym(char):
+    """Converts a unicode character to a *keysym*.
+
+    :param str char: The unicode character.
+
+    :return: the corresponding *keysym*, or ``0`` if it cannot be found
+    """
+    ordinal = ord(char)
+    if ordinal < 0x100:
+        return ordinal
+    else:
+        return ordinal | 0x01000000
+
+
 def symbol_to_keysym(symbol):
     """Converts a symbol name to a *keysym*.
 
@@ -313,16 +354,15 @@ def symbol_to_keysym(symbol):
 
     :return: the corresponding *keysym*, or ``0`` if it cannot be found
     """
-    # First try simple translation
+    # First try simple translation, and if that fails, try checking a module
+    # attribute of Xlib.keysymdef.xkb
     keysym = Xlib.XK.string_to_keysym(symbol)
     if keysym:
         return keysym
-
-    # If that fails, try checking a module attribute of Xlib.keysymdef.xkb
-    if not keysym:
+    else:
         try:
             return getattr(Xlib.keysymdef.xkb, 'XK_' + symbol, 0)
-        except:
+        except AttributeError:
             return SYMBOLS.get(symbol, (0,))[0]
 
 
@@ -338,20 +378,11 @@ class ListenerMixin(object):
     #: We use this instance for parsing the binary data
     _EVENT_PARSER = Xlib.protocol.rq.EventField(None)
 
-    class _WrappedException(Exception):
-        """Raised by the handler wrapper when an exception is raised in the
-        handler, or when the listener is stopped to escape the recording.
-
-        In the former case, the root exception is passed as the first argument
-        to the constructor, and in the latter case no arguments are passed.
-        """
-        pass
-
     def _run(self):
         self._display_stop = Xlib.display.Display()
         self._display_record = Xlib.display.Display()
-        with display_manager(self._display_record) as d:
-            self._context = d.record_create_context(
+        with display_manager(self._display_stop) as dm:
+            self._context = dm.record_create_context(
                 0,
                 [Xlib.ext.record.AllClients],
                 [{
@@ -365,28 +396,59 @@ class ListenerMixin(object):
                     'client_started': False,
                     'client_died': False}])
 
+        # pylint: disable=W0702; we want to silence errors
         try:
             self._initialize(self._display_stop)
             self._mark_ready()
+            if self.suppress:
+                with display_manager(self._display_record) as dm:
+                    self._suppress_start(dm)
             self._display_record.record_enable_context(
                 self._context, self._handler)
-        except self._WrappedException as e:
-            if e.args:
-                # TODO: Handle
-                pass
+        except:
+            # This exception will have been passed to the main thread
+            pass
         finally:
+            if self.suppress:
+                with display_manager(self._display_stop) as dm:
+                    self._suppress_stop(dm)
             self._display_record.record_free_context(self._context)
             self._display_stop.close()
             self._display_record.close()
+        # pylint: enable=W0702
 
-    def _stop(self):
+    def _stop_platform(self):
         if not hasattr(self, '_context'):
             self.wait()
+        # pylint: disable=W0702; we must ignore errors
         try:
-            self._display_stop.record_disable_context(self._context)
+            with display_manager(self._display_stop) as dm:
+                dm.record_disable_context(self._context)
         except:
-            # Ignore errors at this point
             pass
+        # pylint: enable=W0702
+
+    def _suppress_start(self, display):
+        """Starts suppressing events.
+
+        :param Xlib.display.Display display: The display for which to suppress
+            events.
+        """
+        raise NotImplementedError()
+
+    def _suppress_stop(self, display):
+        """Starts suppressing events.
+
+        :param Xlib.display.Display display: The display for which to suppress
+            events.
+        """
+        raise NotImplementedError()
+
+    @property
+    def _event_mask(self):
+        """The event mask.
+        """
+        return functools.reduce(operator.__or__, self._EVENTS, 0)
 
     @AbstractListener._emitter
     def _handler(self, events):
@@ -398,23 +460,15 @@ class ListenerMixin(object):
         :param events: The events passed by *X*. This is a binary block
             parsable by :attr:`_EVENT_PARSER`.
         """
-        # If
         if not self.running:
-            raise self._WrappedException()
+            raise self.StopException()
 
-        try:
-            data = events.data
+        data = events.data
 
-            while len(data):
-                event, data = self._EVENT_PARSER.parse_binary_value(
-                    data, self._display_record.display, None, None)
-                self._handle(self._display_stop, event)
-
-        except self.StopException:
-            raise
-
-        except BaseException as e:
-            raise self._WrappedException(e)
+        while data and len(data):
+            event, data = self._EVENT_PARSER.parse_binary_value(
+                data, self._display_record.display, None, None)
+            self._handle(self._display_stop, event)
 
     def _initialize(self, display):
         """Initialises this listener.

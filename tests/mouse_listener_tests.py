@@ -1,7 +1,24 @@
+# coding=utf-8
+# pystray
+# Copyright (C) 2015-2020 Moses Palmér
+#
+# This program is free software: you can redistribute it and/or modify it under
+# the terms of the GNU Lesser General Public License as published by the Free
+# Software Foundation, either version 3 of the License, or (at your option) any
+# later version.
+#
+# This program is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+# FOR A PARTICULAR PURPOSE. See the GNU Lesser General Public License for more
+# details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with this program. If not, see <http://www.gnu.org/licenses/>.
+
 import pynput.mouse
 import time
 
-from . import EventTest
+from . import EventTest, darwin, win32, xorg
 
 
 class MouseListenerTest(EventTest):
@@ -99,3 +116,84 @@ class MouseListenerTest(EventTest):
             'No scroll down registered',
             on_scroll=lambda x, y, dx, dy: not (
                 dy < 0))
+
+    def test_suppress(self):
+        """Tests that passing ``suppress`` prevents events from propagating"""
+        self.suppress = True
+        self.notify(
+            'Click right mouse button where it will have an effect, and then '
+            'press the left mouse button')
+        self.assert_stop(
+            'No right click registered',
+            on_click=lambda x, y, button, pressed: not (
+                pressed and button == pynput.mouse.Button.left))
+        self.confirm('Was the action suppressed?')
+
+    def test_reraise(self):
+        """Tests that exception are reraised"""
+        class MyException(Exception): pass
+
+        def on_click(x, y, button, pressed):
+            raise MyException()
+
+        with self.assertRaises(MyException):
+            with pynput.mouse.Listener(
+                    on_click=on_click) as l:
+                self.notify('Click any button')
+                l.join()
+
+    @darwin
+    def test_options_darwin(self):
+        """Tests that options are correctly set on OSX"""
+        self.assertTrue(
+            pynput.mouse.Listener(
+                darwin_test=True,
+                win32_test=False,
+                xorg_test=False)._options['test'])
+
+    @win32
+    def test_options_win32(self):
+        """Tests that options are correctly set on Windows"""
+        self.assertTrue(
+            pynput.mouse.Listener(
+                darwin_test=False,
+                win32_test=True,
+                xorg_test=False)._options['test'])
+
+    @xorg
+    def test_options_xorg(self):
+        """Tests that options are correctly set on Linux"""
+        self.assertTrue(
+            pynput.mouse.Listener(
+                darwin_test=False,
+                win32_test=False,
+                xorg_test=True)._options['test'])
+
+    def test_events(self):
+        """Tests that events are correctly yielded"""
+        from pynput.mouse import Button, Events
+        with Events() as events:
+            self.notify('Move the mouse')
+            for event in events:
+                if isinstance(event, Events.Move):
+                    break
+
+            self.notify('Press the left mouse button')
+            for event in events:
+                if isinstance(event, Events.Click) \
+                        and event.button == Button.left:
+                    break
+
+            self.notify('Press the right mouse button')
+            for event in events:
+                if isinstance(event, Events.Click) \
+                        and event.button == Button.right:
+                    break
+
+            self.notify('Scroll the mouse')
+            for event in events:
+                if isinstance(event, Events.Scroll):
+                    break
+
+            self.notify('Do not touch the mouse', delay=2.0)
+            self.assertIsNone(events.get(1.0))
